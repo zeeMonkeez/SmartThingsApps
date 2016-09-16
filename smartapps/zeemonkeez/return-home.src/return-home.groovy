@@ -26,58 +26,63 @@ definition(
 )
 
 preferences {
-    page(name: "firstPage", title: "Settings",
-         nextPage: "otherSettings", uninstall: true, install: false) {
+	page(name: "firstPage", title: "Settings",
+		nextPage: "otherSettings", uninstall: true, install: false) {
+
 		section("When someone comes home ...") {
 		    input "presence1", "capability.presenceSensor", title: "Who?", multiple: true, required: true
 		}
-    	section("Turn on these switches ...") {
+		section("Turn on these switches ...") {
 			input "theSwitch", "capability.switch", multiple: true, title: "What?"
 		}
-    	section("Set dimmers to this value:") {
+		section("Set dimmers to this value:") {
 			input "dimmerV", "number", range: "0..99", title: "What level?", defaultValue: 50
 		}
 		section("Reset to old state how many minutes later?") {
+			paragraph "State will not be reset if equal to or less than 0"
 			input "minutesLater", "number", title: "When?", defaultValue: 5
 		}
-        section("Night Mode:") {
+		section("Night Mode:") {
 			input "onlyAtNight", "bool", title: "Only turn on between sunset and sunrise?", defaultValue: true
-        }
-        section("Save energy:") {
-            input "alwaysTurnOff", "bool", title: "Turn switches off even if they had been on?", defaultValue: false
-        }
-        section([mobileOnly:true]) {
-            label title: "Assign a name", required: false
-            mode title: "Set for specific mode(s)", required: false
-        }
-
-    }
-    page(name: "otherSettings", title:"Other Settings", uninstall: true, install: true, nextPage:"firstPage") {
-   	section ("Sunset offset (optional)...") {
-		input "sunsetOffsetValue", "text", title: "HH:MM", required: false
-		input "sunsetOffsetDir", "enum", title: "Before or After", required: false, options: ["Before","After"]
-	}
-    section ("Sunrise offset (optional)...") {
-		input "sunriseOffsetValue", "text", title: "HH:MM", required: false
-		input "sunriseOffsetDir", "enum", title: "Before or After", required: false, options: ["Before","After"]
-	}
-	
-	section ("Zip code (optional, defaults to location coordinates when location services are enabled)...") {
-		input "zipCode", "text", title: "Zip code", required: false
-	}
-    
-    section("Via a push notification and/or an SMS message"){
-		input("recipients", "contact", title: "Send notifications to") {
-			input "phone", "phone", title: "Enter a phone number to get SMS", required: false
-			paragraph "If outside the US please make sure to enter the proper country code"
-			input "pushAndPhone", "enum", title: "Notify me via Push Notification", required: false, options: ["Yes", "No"]
+		}
+		section("Save energy:") {
+			input "alwaysTurnOff", "bool", title: "Turn switches off even if they had been on?", defaultValue: false
+		}
+		section([mobileOnly:true]) {
+			label title: "Assign a name", required: false
+			mode title: "Set for specific mode(s)", required: false
 		}
 	}
+	page(name: "otherSettings", title:"Other Settings", uninstall: true, install: true, nextPage:"firstPage") {
+		section ("Sunset offset (optional)...") {
+			input "sunsetOffsetValue", "text", title: "HH:MM", required: false
+			input "sunsetOffsetDir", "enum", title: "Before or After", required: false, options: ["Before","After"]
+		}
+		section ("Sunrise offset (optional)...") {
+			input "sunriseOffsetValue", "text", title: "HH:MM", required: false
+			input "sunriseOffsetDir", "enum", title: "Before or After", required: false, options: ["Before","After"]
+		}
+	
+		section ("Zip code (optional, defaults to location coordinates when location services are enabled)...") {
+			input "zipCode", "text", title: "Zip code", required: false
+		}
+	
+		section("Only perform this action if nobody had been home at all.") {
+			input "onlyIfHouseEmpty", "bool", title:"Perform only when house empty", defaultValue: false, required: false
+		}
+    
+		section("Via a push notification and/or an SMS message"){
+			input("recipients", "contact", title: "Send notifications to") {
+				input "phone", "phone", title: "Enter a phone number to get SMS", required: false
+				paragraph "If outside the US please make sure to enter the proper country code"
+				input "pushAndPhone", "enum", title: "Notify me via Push Notification", required: false, options: ["Yes", "No"]
+			}
+		}
 	}
-
 }
 
 def initialize() {
+	state.hasBeenTriggered = false
 	subscribe(presence1, "presence.present", presence)
 	subscribe(location, "position", locationPositionChange)
 	subscribe(location, "sunriseTime", sunriseSunsetTimeHandler)
@@ -115,37 +120,53 @@ def turnOffSwitch() {
 
 def presence(evt)
 {
-    def map = [:]
-    if (!onlyAtNight || enabled()) {
-    theSwitch?.each {
-		map[it.id] = [switch: it.currentSwitch, level: it.currentLevel]
-        def isDimmer = it.capabilities.any{cap ->
-        	cap.name == "Switch Level"}
-        if (isDimmer) {
-        	it.setLevel(dimmerV)
-            log.info "Set ${it.displayName} to level $dimmerV"
-        }
-        it.on()
-        log.info "Turn ${it.displayName} on"
-        
-    }
-    state.beforeState = map
-    def delay = minutesLater * 60
-    log.info "Turn off in $minutesLater min"
-	runIn(delay, restoreState)
-    
-    def devNames = theSwitch.collect({it.displayName}).join(', ')
-    log.debug "recipients configured: $recipients"
-
-    def message = "${evt.displayName} arrived home, turning on $devNames!"
-    sendMessage(message)
+	// test if anybody was at home at all, or not. If there was, and option was set,
+	// ignore event
+	def presAtHome = presence1?.find{
+		it.id == evt.device.id ? false : it.currentPresence == 'present'
 	}
-    else {
-    	log.info "Presence detected, but not at night."
-    }
+	def run_empty_test = presAtHome? onlyIfHouseEmpty : false
+
+	if (run_empty_test) {
+		log.info "Presence detected ($evt.device.displayName), but $presAtHome.displayName was already there and this task should only run when house empty."
+		return
+	}
+	if (onlyAtNight && ! enabled()) {
+		log.info "Presence detected ($evt.device.displayName), but not at night."
+		return
+	}
+	if (!state.hasBeenTriggered) {
+		def map = [:]
+		theSwitch?.each {
+			map[it.id] = [switch: it.currentSwitch, level: it.currentLevel]
+			def isDimmer = it.capabilities.any{cap ->cap.name == "Switch Level"}
+			if (isDimmer) {
+				it.setLevel(dimmerV)
+				log.info "Set ${it.displayName} to level $dimmerV"
+			}
+			it.on()
+			log.info "Turn ${it.displayName} on"
+		}
+		state.beforeState = map
+	}
+	state.hasBeenTriggered = true
+	if (minutesLater > 0) {
+		def delay = minutesLater * 60
+		log.info "Turn off in $minutesLater min"
+		runIn(delay, restoreState)
+	}
+    
+	def devNames = theSwitch.collect({it.displayName}).join(', ')
+	log.debug "recipients configured: $recipients"
+
+	def message = "${evt.displayName} arrived home, turning on $devNames!"
+	sendMessage(message)
+
+    
 }
 
 def restoreState() {
+	state.hasBeenTriggered = false
 	def map = state.beforeState
     if (alwaysTurnOff) {
     	log.info "Turn everything off"
@@ -228,8 +249,3 @@ private sendMessage(msg) {
 		sendNotification(msg, options)
 	}
 }
-
-
-
-
-

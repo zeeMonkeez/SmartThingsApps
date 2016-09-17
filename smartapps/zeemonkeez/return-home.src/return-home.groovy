@@ -36,7 +36,7 @@ preferences {
 			input "theSwitch", "capability.switch", multiple: true, title: "What?"
 		}
 		section("Set dimmers to this value:") {
-			input "dimmerV", "number", range: "0..99", title: "What level?", defaultValue: 50
+			input "dimmerV", "number", range: "1..99", title: "What level?", defaultValue: 50
 		}
 		section("Reset to old state how many minutes later?") {
 			paragraph "State will not be reset if equal to or less than 0"

@@ -250,6 +250,9 @@ def presence(evt) {
 			}
 			if (devState.switchOffDelay > 0) {
 				def delay = devState.switchOffDelay * 60
+
+			 	addToSchedule(dev.id, [method: ['restoreStateForDeviceById', [dev.id]], inSeconds: delay])
+
 				log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
 
 				runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
@@ -269,6 +272,12 @@ def presence(evt) {
 
 }
 
+def restoreStateForDeviceById(devId) {
+	def dev = settings.switches?.find {it.id == devId}
+	if (dev) {
+		restoreStateForDevice(dev)
+	}
+}
 def restoreStateForDevice(dev) {
 	state.devices[dev.id].hasBeenTriggered = false
 	def devState = state.devices[dev.id]
@@ -352,3 +361,44 @@ private sendMessage(msg) {
 	}
 }
 
+// Implementation of our own scheduling system
+// It allows overwriting of scheduled events, for individual devices
+
+def addToSchedule(did, Map pmap) {
+	state.schedule = state.schedule ?: [:]
+	state.schedule[did] = pmap
+	def t_now = now()
+	def ptime = pmap.inSeconds?: (pmap.time? (pmap.time-t_now)/1e3 : 60)
+	state.schedule[did].time = pmap.time ?: t_now + ptime*1e3
+
+	// add 2 seconds to ensure handler will be called after event
+	runIn(ptime + 2, scheduleHandler, [overwrite: false])
+	log.info "Adding task $pmap to scheduler for $did"
+}
+
+
+def scheduleHandler(val) {
+	state.schedule = state.schedule ?: [:]
+	log.info "Working handler"
+	log.debug "Pre-state.schedule: $state.schedule"
+	def t_now = now()
+	log.debug "Time now: $t_now"
+
+	def due = state.schedule.findAll {it.value?.time < t_now}
+	log.debug "Tasks due: $due"
+	due.each {
+		def mpar = it.value?.methods ?: [it.value?.method]
+		if (mpar instanceof String) {
+			mpar = [mpar]
+		}
+		def device = settings.switches.find {sw -> sw.id == it.key}
+		//[it.value?.methods, it.value?.params].transpose()
+		mpar.each {mpa ->
+			def m = mpa[0]
+			def p = mpa[1]?:[]
+			device?."${m}"(*p)
+		}
+		state.schedule.remove(it.key)
+	}
+	log.debug "state.schedule is now $state.schedule"
+}

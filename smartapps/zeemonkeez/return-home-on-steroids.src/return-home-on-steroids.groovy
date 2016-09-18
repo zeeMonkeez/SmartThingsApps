@@ -39,6 +39,10 @@ def mainPage(params) {
 	log.debug "Main Page"
 
 	dynamicPage(name: "mainPage", uninstall: state.installed, install: true) {
+		section("When someone comes home ...") {
+			input "presenceDevices", "capability.presenceSensor", title: "Who?", multiple: true, required: true
+		}
+
 		section("Turn on these devices:") {
 			input "switches", "capability.switch", multiple: true, title: "What?", required: true
 		}
@@ -78,6 +82,10 @@ def mainPage(params) {
 				state: visitedPage("extraOptionsPage")
 			)
 
+		}
+		section([mobileOnly:true]) {
+			label title: "Assign a name", required: false
+			mode title: "Set for specific mode(s)", required: false
 		}
 	}
 }
@@ -167,35 +175,18 @@ def visitedPage(page) {
 	state.visited[page] ? "complete": ""
 }
 
-		def saveDeviceChoice(devMap) {
-			state.devices = state?.devices ?: [:]
-			devMap?.each{ id, v ->
-				state.devices[id] = v
-			}
-			//    state.devices[devMap.id] = [level: devMap.level]
-			log.debug "adding device to list: $state.devices"
-		}
-
-		def deleteDeviceID(devID) {
-			state.devices = state?.devices ?: [:]
-			state.devices.remove(devID)
-		}
-
-		def checkIfDimmer(dev) {
-			log.debug "Checking device(s): $dev"
-			//log.debug dev.getClass() //(it instanceof Device) &&
-			return   dev?.any{it.hasCapability("Switch Level")}
-		}
-		def makeDevMap(devs, lvl) {
-			log.debug "Make map from $devs, $lvl"
-			log.debug devs instanceof physicalgraph.app.DeviceWrapper
-			if (devs instanceof physicalgraph.app.DeviceWrapper) {
-				devs = [devs]
-			}
-			def myMap = devs.collectEntries({dev -> [(dev.id): [level: dev.capabilities.any{cap ->cap.name == "Switch Level"} ? lvl : null]]})
-			log.debug "Finished map:  $myMap"
-			return myMap
-		}
+def parseSettingsForDevice(dev) {
+	def devId = dev.id
+	state.devices[devId].isDimmer = dev.hasCapability("Switch Level")
+	state.devices[devId].switchLevel = state.devices[devId].isDimmer ? settings["switchLevel_${devId}"] ?: settings.switchLevel : null
+	state.devices[devId].switchOffDelay = settings["switchOffDelay_${devId}"] ?: settings.switchOffDelay
+	state.devices[devId].onlyAtNight = settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight
+	state.devices[devId].switchAlwaysTurnOff = settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff
+	state.devices[devId].hasBeenTriggered = false
+	state.devices[devId].oldLevel = null
+	state.devices[devId].oldSwitch = 'off'
+	return state.devices[devId]
+}
 
 
 // ========================================================
@@ -218,11 +209,146 @@ def installed() {
 def updated() {
 	log.debug "Updated with settings: ${settings}"
 	unsubscribe()
+	unschedule()
 	initialize()
 }
 
 def initialize() {
-	// TODO: subscribe to attributes, devices, locations, etc.
+	state.devices = state?.devices ?: [:]
+	settings.switches?.each {parseSettingsForDevice(it)}
+	subscribe(presenceDevices, "presence.present", presence)
+	subscribe(location, "position", locationPositionChange)
+	subscribe(location, "sunriseTime", sunriseSunsetTimeHandler)
+	subscribe(location, "sunsetTime", sunriseSunsetTimeHandler)
+	astroCheck()
+
 }
 
-// TODO: implement event handlers
+
+def presence(evt) {
+	// test if anybody was at home at all, or not. If there was, and option was set,
+	// ignore event
+	def someoneAtHome = presenceDevices?.find{
+		it.id == evt.device.id ? false : it.currentPresence == 'present'
+	}
+	def atNight = isAtNight()
+	def switchedSwitches = []
+	settings.switches?.each { dev ->
+		def devState = state.devices[dev.id]
+		if ( atNight || !devState.onlyAtNight) {
+			if (!devState.hasBeenTriggered) {
+				state.devices[dev.id].oldSwitch = dev.currentSwitch
+				if (devState.isDimmer) {
+					state.devices[dev.id].oldLevel = dev.currentLevel
+					dev.setLevel(devState.switchLevel)
+					log.info "Set ${dev.displayName} to level $devState.switchLevel"
+				}
+				dev.on()
+				log.info "Turn $dev.displayName on."
+				log.debug "Saving Old State ${state.devices[dev.id].oldSwitch}, ${state.devices[dev.id].oldLevel}."
+				state.devices[dev.id].hasBeenTriggered = true
+			}
+			if (devState.switchOffDelay > 0) {
+				def delay = devState.switchOffDelay * 60
+				log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
+
+				runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
+			}
+			switchedSwitches << dev.displayName
+		}
+		else {
+			log.info "$dev.displayName only turns on at night."
+		}
+	}
+
+	def devNames = switchedSwitches.join(', ')
+	log.debug "recipients configured: $recipients"
+
+	def message = "${evt.displayName} arrived home, turning on $devNames!"
+	sendMessage(message)
+
+}
+
+def restoreStateForDevice(dev) {
+	state.devices[dev.id].hasBeenTriggered = false
+	def devState = state.devices[dev.id]
+	if (devState.switchAlwaysTurnOff) {
+		dev.off()
+	}
+	else {
+		log.debug("Old level: $devState.oldLevel")
+		if (devState.oldLevel) {
+			dev.setLevel(devState.oldLevel)
+		}
+		if (devState.oldSwitch == 'off') {
+			log.info "Turning off ${dev.displayName}"
+			dev.off()
+		}
+	}
+}
+
+
+// Location + Sunset
+
+def locationPositionChange(evt) {
+	log.trace "locationChange()"
+	astroCheck()
+}
+
+def sunriseSunsetTimeHandler(evt) {
+	state.lastSunriseSunsetEvent = now()
+	log.debug "SmartNightlight.sunriseSunsetTimeHandler($app.id)"
+	astroCheck()
+}
+
+def astroCheck() {
+	def s = getSunriseAndSunset(zipCode: zipCode, sunriseOffset: sunriseOffset, sunsetOffset: sunsetOffset)
+	state.riseTime = s.sunrise.time
+	state.setTime = s.sunset.time
+	log.debug "rise: ${new Date(state.riseTime)}($state.riseTime), set: ${new Date(state.setTime)}($state.setTime)"
+}
+
+private getSunriseOffset() {
+	sunriseOffsetValue ? (sunriseOffsetDir == "Before" ? "-$sunriseOffsetValue" : sunriseOffsetValue) : null
+}
+
+private getSunsetOffset() {
+	sunsetOffsetValue ? (sunsetOffsetDir == "Before" ? "-$sunsetOffsetValue" : sunsetOffsetValue) : null
+}
+
+private isAtNight() {
+	def result
+	def t = now()
+	result = t < state.riseTime || t > state.setTime
+	result
+}
+
+
+private sendMessage(msg) {
+	Map options = [:]
+
+	log.debug "pushAndPhone:$pushAndPhone, '$msg'"
+
+	if (location.contactBookEnabled) {
+		sendNotificationToContacts(msg, recipients, options)
+	} else {
+		if (phone) {
+			options.phone = phone
+			if (pushAndPhone != 'No') {
+				log.debug 'Sending push and SMS'
+				options.method = 'both'
+			} else {
+				log.debug 'Sending SMS'
+				options.method = 'phone'
+			}
+		} else if (pushAndPhone != 'No') {
+			log.debug 'Sending push'
+			options.method = 'push'
+		} else {
+			log.debug 'Sending nothing'
+			options.method = 'none'
+		}
+		sendNotification(msg, options)
+	}
+}
+

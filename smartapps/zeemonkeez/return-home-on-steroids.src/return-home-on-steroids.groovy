@@ -155,18 +155,21 @@ def makeDeviceSection(dev) {
 	log.debug "Making device section for ${dev.displayName}"
 	return section(dev.displayName) {
 		if (dev.hasCapability("Switch Level")) {
-			input "switchLevel_${dev.id}", "number", range: "1..99", title: "What level?", defaultValue: switchLevel, required: false
+			input "switchLevel_${dev.id}", "number", range: "1..99", title: "What level?", required: false
 			paragraph "Set dimmer to level 1..99"
 		}
 
-		input "switchOffDelay_${dev.id}", "number", title: "Delay in Minutes", defaultValue: switchOffDelay, required: false
+		input "switchOffDelay_${dev.id}", "number", title: "Delay in Minutes", required: false
 		paragraph "Reset to old state how many minutes after arrival? State will not be reset if equal to or less than 0"
 
-		input "onlyAtNight_${dev.id}", "enum", title: "After dark only?", defaultValue: onlyAtNight, options: ["Yes", "No"], required: false
+		input "onlyAtNight_${dev.id}", "enum", title: "After dark only?", options: ["Yes", "No"], required: false
 		paragraph "Only trigger between sunset and sunrise."
 
-		input "switchAlwaysTurnOff_${dev.id}", "enum", title: "Turn off even if switch had been on?", defaultValue: switchAlwaysTurnOff, options: ["Yes", "No"], required: false
+		input "switchAlwaysTurnOff_${dev.id}", "enum", title: "Turn off even if switch had been on?", options: ["Yes", "No"], required: false
 		paragraph "If “yes”, the previous state will be ignored and the switch will be turned off after the delay."
+
+		input "onlyIfHouseEmpty_${dev.id}", "enum", title:"Perform only when house empty", required: false, options: ["Yes", "No"]
+		paragraph("If “yes” and the current presence sensor is not the only one “present”, the device will not turn on.")
 
 	}
 }
@@ -177,11 +180,13 @@ def visitedPage(page) {
 
 def parseSettingsForDevice(dev) {
 	def devId = dev.id
+	state.devices[devId] = state.devices[devId]?: [:]
 	state.devices[devId].isDimmer = dev.hasCapability("Switch Level")
 	state.devices[devId].switchLevel = state.devices[devId].isDimmer ? settings["switchLevel_${devId}"] ?: settings.switchLevel : null
 	state.devices[devId].switchOffDelay = settings["switchOffDelay_${devId}"] ?: settings.switchOffDelay
-	state.devices[devId].onlyAtNight = settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight
-	state.devices[devId].switchAlwaysTurnOff = settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff
+	state.devices[devId].onlyAtNight = (settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight) == '0'
+	state.devices[devId].switchAlwaysTurnOff = (settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff) == '0'
+	state.devices[devId].onlyIfHouseEmpty = (settings["onlyIfHouseEmpty_${devId}"] ?: settings.onlyIfHouseEmpty) == '0'
 	state.devices[devId].hasBeenTriggered = false
 	state.devices[devId].oldLevel = null
 	state.devices[devId].oldSwitch = 'off'
@@ -234,33 +239,8 @@ def presence(evt) {
 	def atNight = isAtNight()
 	def switchedSwitches = []
 	settings.switches?.each { dev ->
-		def devState = state.devices[dev.id]
-		if ( atNight || !devState.onlyAtNight) {
-			if (!devState.hasBeenTriggered) {
-				state.devices[dev.id].oldSwitch = dev.currentSwitch
-				if (devState.isDimmer) {
-					state.devices[dev.id].oldLevel = dev.currentLevel
-					dev.setLevel(devState.switchLevel)
-					log.info "Set ${dev.displayName} to level $devState.switchLevel"
-				}
-				dev.on()
-				log.info "Turn $dev.displayName on."
-				log.debug "Saving Old State ${state.devices[dev.id].oldSwitch}, ${state.devices[dev.id].oldLevel}."
-				state.devices[dev.id].hasBeenTriggered = true
-			}
-			if (devState.switchOffDelay > 0) {
-				def delay = devState.switchOffDelay * 60
-
-			 	addToSchedule(dev.id, [method: ['restoreStateForDeviceById', [dev.id]], inSeconds: delay])
-
-				log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
-
-				runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
-			}
+		if (triggerDevice(dev, atNight: atNight, someoneAtHome: someoneAtHome)) {
 			switchedSwitches << dev.displayName
-		}
-		else {
-			log.info "$dev.displayName only turns on at night."
 		}
 	}
 
@@ -270,6 +250,36 @@ def presence(evt) {
 	def message = "${evt.displayName} arrived home, turning on $devNames!"
 	sendMessage(message)
 
+}
+
+def triggerDevice(dev, Map envinfo) {
+	def devState = state.devices[dev.id]
+	if (!envinfo.atNight && devState.onlyAtNight) {
+		log.info "$dev.displayName only turns on at night."
+		return false
+	}
+	if (envinfo.someoneAtHome && !devState.onlyIfHouseEmpty) {
+		log.info "$dev.displayName only turns on if house is empty."
+		return false
+	}
+	if (!devState.hasBeenTriggered) {
+		state.devices[dev.id].oldSwitch = dev.currentSwitch
+		if (devState.isDimmer) {
+			state.devices[dev.id].oldLevel = dev.currentLevel
+			dev.setLevel(devState.switchLevel)
+			log.info "Set ${dev.displayName} to level $devState.switchLevel"
+		}
+		dev.on()
+		log.info "Turn $dev.displayName on."
+		log.debug "Saving Old State ${state.devices[dev.id].oldSwitch}, ${state.devices[dev.id].oldLevel}."
+		state.devices[dev.id].hasBeenTriggered = true
+	}
+	if (devState.switchOffDelay > 0) {
+		def delay = devState.switchOffDelay * 60
+		addToSchedule(dev.id, [method: ['restoreStateForDeviceById', [dev.id]], inSeconds: delay])
+		log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
+		runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
+	}
 }
 
 def restoreStateForDeviceById(devId) {

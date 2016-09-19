@@ -47,20 +47,20 @@ def mainPage(params) {
 			input "switches", "capability.switch", multiple: true, title: "What?", required: true
 		}
 		section("Set dimmers to this default value:") {
-			input "switchLevel", "number", range: "1..99", title: "What level?", defaultValue: 50
+			input "switchLevel", "number", range: "1..99", title: "What level?", defaultValue: 50, required: true
 		}
 		section("Reset to old state how many minutes later?") {
 			paragraph "State will not be reset if equal to or less than 0"
 			input "switchOffDelay", "number", title: "delay in minutes", defaultValue: 5, required: true
 		}
 		section("Night Mode:") {
-			input "onlyAtNight", "enum", title: "Only turn on between sunset and sunrise?", defaultValue: "Yes", options: ["Yes", "No"]
+			input name: "onlyAtNight", type: "enum", title: "Only turn on between sunset and sunrise?", options: ["Yes", "No"], required: true, defaultValue: "Yes"
 		}
 		section("Save energy:") {
-			input "switchAlwaysTurnOff", "enum", title: "Turn switches off even if they had been on?", options: ["Yes", "No"], defaultValue: "No"
+			input name: "switchAlwaysTurnOff", type: "enum", title: "Turn switches off even if they had been on?", options: ["Yes", "No"], defaultValue: "No", required: true
 		}
 		section("Only activate switch if nobody had been home at all.") {
-			input "onlyIfHouseEmpty", "enum", title:"Perform only when house empty", defaultValue: "No", required: true, options: ["Yes", "No"]
+			input name: "onlyIfHouseEmpty", type: "enum", title:"Perform only when house empty", defaultValue: "No", required: true, options: ["Yes", "No"]
 		}
 
 		section("Edit switch details") {
@@ -184,9 +184,17 @@ def parseSettingsForDevice(dev) {
 	state.devices[devId].isDimmer = dev.hasCapability("Switch Level")
 	state.devices[devId].switchLevel = state.devices[devId].isDimmer ? settings["switchLevel_${devId}"] ?: settings.switchLevel : null
 	state.devices[devId].switchOffDelay = settings["switchOffDelay_${devId}"] ?: settings.switchOffDelay
-	state.devices[devId].onlyAtNight = (settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight) == '0'
-	state.devices[devId].switchAlwaysTurnOff = (settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff) == '0'
-	state.devices[devId].onlyIfHouseEmpty = (settings["onlyIfHouseEmpty_${devId}"] ?: settings.onlyIfHouseEmpty) == '0'
+	state.devices[devId].onlyAtNight = (settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight) == 'Yes'
+	state.devices[devId].switchAlwaysTurnOff = (settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff) == 'Yes'
+	state.devices[devId].onlyIfHouseEmpty = (settings["onlyIfHouseEmpty_${devId}"] ?: settings.onlyIfHouseEmpty) == 'Yes'
+    log.debug "settings.onlyAtNight ${settings.onlyAtNight}"
+    log.debug "settings.switchAlwaysTurnOff ${settings.switchAlwaysTurnOff}"
+    log.debug "settings.onlyIfHouseEmpty ${settings.onlyIfHouseEmpty}"
+
+
+    def oihe = settings.onlyIfHouseEmpty
+    def oihed = settings["onlyIfHouseEmpty_${devId}"]
+    log.debug "$dev.displayName only if house empty: $oihe, $oihed -> ${state.devices[devId].onlyIfHouseEmpty}"
 	state.devices[devId].hasBeenTriggered = false
 	state.devices[devId].oldLevel = null
 	state.devices[devId].oldSwitch = 'off'
@@ -249,16 +257,18 @@ def presence(evt) {
 
 	def message = "${evt.displayName} arrived home, turning on $devNames!"
 	sendMessage(message)
-
+	sendNotificationEvent(message)
+    
 }
 
 def triggerDevice(Map envinfo, dev) {
 	def devState = state.devices[dev.id]
+    def callScheduleList = []
 	if (!envinfo.atNight && devState.onlyAtNight) {
 		log.info "$dev.displayName only turns on at night."
 		return false
 	}
-	if (envinfo.someoneAtHome && !devState.onlyIfHouseEmpty) {
+	if (envinfo.someoneAtHome && devState.onlyIfHouseEmpty) {
 		log.info "$dev.displayName only turns on if house is empty."
 		return false
 	}
@@ -275,36 +285,20 @@ def triggerDevice(Map envinfo, dev) {
 		state.devices[dev.id].hasBeenTriggered = true
 	}
 	if (devState.switchOffDelay > 0) {
+        if (state.devices[dev.id].oldLevel) {
+        	callScheduleList << ['setLevel', [state.devices[dev.id].oldLevel]]
+        }
+    	if (state.devices[dev.id].switchAlwaysTurnOff) {
+        	callScheduleList << ['off']
+        }
+        else {
+        	callScheduleList << state.devices[dev.id].oldSwitch
+        }
 		def delay = devState.switchOffDelay * 60
-		addToSchedule(dev.id, [method: ['restoreStateForDeviceById', [dev.id]], inSeconds: delay])
-		log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
-		runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
+		addToSchedule(dev.id, [methods: callScheduleList, inSeconds: delay])
+		log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min, will perform these actions: $callScheduleList"
 	}
 	return true
-}
-
-def restoreStateForDeviceById(devId) {
-	def dev = settings.switches?.find {it.id == devId}
-	if (dev) {
-		restoreStateForDevice(dev)
-	}
-}
-def restoreStateForDevice(dev) {
-	state.devices[dev.id].hasBeenTriggered = false
-	def devState = state.devices[dev.id]
-	if (devState.switchAlwaysTurnOff) {
-		dev.off()
-	}
-	else {
-		log.debug("Old level: $devState.oldLevel")
-		if (devState.oldLevel) {
-			dev.setLevel(devState.oldLevel)
-		}
-		if (devState.oldSwitch == 'off') {
-			log.info "Turning off ${dev.displayName}"
-			dev.off()
-		}
-	}
 }
 
 
@@ -399,15 +393,21 @@ def scheduleHandler(val) {
 	log.debug "Tasks due: $due"
 	due.each {
 		def mpar = it.value?.methods ?: [it.value?.method]
+        log.debug "mpar $mpar"
 		if (mpar instanceof String) {
 			mpar = [mpar]
 		}
+        log.debug "mpar2 $mpar"
 		def device = settings.switches.find {sw -> sw.id == it.key}
-		//[it.value?.methods, it.value?.params].transpose()
+
 		mpar.each {mpa ->
+	        log.debug "mpa $mpa"
 			def m = mpa[0]
 			def p = mpa[1]?:[]
 			device?."${m}"(*p)
+            def message = "Calling ${device.displayName}.${m}(${p})"
+            log.debug message
+            sendNotificationEvent(message)
 		}
 		state.schedule.remove(it.key)
 	}

@@ -252,7 +252,7 @@ def presence(evt) {
 
 }
 
-def triggerDevice(dev, Map envinfo) {
+def triggerDevice(Map envinfo, dev) {
 	def devState = state.devices[dev.id]
 	if (!envinfo.atNight && devState.onlyAtNight) {
 		log.info "$dev.displayName only turns on at night."
@@ -280,6 +280,7 @@ def triggerDevice(dev, Map envinfo) {
 		log.info "Turn off ${dev.displayName} in ${devState.switchOffDelay} min"
 		runIn(delay, "restoreStateForDevice", [data: dev.id, overwrite: false])
 	}
+	return true
 }
 
 def restoreStateForDeviceById(devId) {

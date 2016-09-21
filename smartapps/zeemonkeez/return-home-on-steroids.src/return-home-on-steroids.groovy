@@ -17,7 +17,7 @@ definition(
 name: "Return Home On Steroids",
 namespace: "zeeMonkeez",
 author: "Jonas Zimmermann",
-description: "Returning home made cool",
+description: "Upon detection of presence, turn on switches and dimmers. Allows switches to be only triggered at night, only if nobody had been home, and to set a delay for turning off. Settings can be overridden per device.",
 category: "Convenience",
 iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
 iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png",
@@ -251,11 +251,15 @@ def presence(evt) {
 			switchedSwitches << dev.displayName
 		}
 	}
-
-	def devNames = switchedSwitches.join(', ')
-	log.debug "recipients configured: $recipients"
-
-	def message = "${evt.displayName} arrived home, turning on $devNames!"
+	def message
+    if (switchedSwitches.size() > 0) {
+		def devNames = switchedSwitches.join(', ')
+		message = "${evt.displayName} arrived at home, turning on $devNames!"
+    }
+    else {
+    	message = "${evt.displayName} arrived at home, but no devices set to be turned on!"
+    }
+    log.debug "recipients configured: $recipients"
 	sendMessage(message)
 	sendNotificationEvent(message)
     

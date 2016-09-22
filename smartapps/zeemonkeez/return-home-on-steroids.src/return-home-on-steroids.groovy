@@ -296,7 +296,7 @@ def triggerDevice(Map envinfo, dev) {
         	callScheduleList << ['off']
         }
         else {
-        	callScheduleList << state.devices[dev.id].oldSwitch
+        	callScheduleList << [state.devices[dev.id].oldSwitch]
         }
 		def delay = devState.switchOffDelay * 60
 		addToSchedule(dev.id, [methods: callScheduleList, inSeconds: delay])
@@ -403,7 +403,7 @@ def scheduleHandler(val) {
 		}
         log.debug "mpar2 $mpar"
 		def device = settings.switches.find {sw -> sw.id == it.key}
-
+if (        state.devices[it.key].hasBeenTriggered ) {
 		mpar.each {mpa ->
 	        log.debug "mpa $mpa"
 			def m = mpa[0]
@@ -413,6 +413,11 @@ def scheduleHandler(val) {
             log.debug message
             sendNotificationEvent(message)
 		}
+        }
+        else {
+        log.debug "Something was supposed to happen with ${device.displayName}, but it has been activated in the meantime, so we will ignore scheduled action."
+        }
+        state.devices[it.key].hasBeenTriggered = false
 		state.schedule.remove(it.key)
 	}
 	log.debug "state.schedule is now $state.schedule"

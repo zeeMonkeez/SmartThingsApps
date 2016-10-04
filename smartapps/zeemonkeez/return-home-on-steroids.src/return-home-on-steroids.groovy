@@ -233,6 +233,7 @@ def initialize() {
 	subscribe(location, "position", locationPositionChange)
 	subscribe(location, "sunriseTime", sunriseSunsetTimeHandler)
 	subscribe(location, "sunsetTime", sunriseSunsetTimeHandler)
+    subscribe(switches, "switch", switchHandler, [filterEvents: false])
 	astroCheck()
 
 }
@@ -264,6 +265,49 @@ def presence(evt) {
 	sendNotificationEvent(message)
     
 }
+
+def switchHandler(evt) {
+	log.info evt.value
+
+	// use Event rather than DeviceState because we may be changing DeviceState to only store changed values
+	def recentStates = evt.device.eventsSince(new Date(now() - 4000), [all:true, max: 10]).findAll{it.name == "switch"}
+	log.debug "${evt.device.displayName}: ${recentStates?.size()} STATES FOUND, LAST AT ${recentStates ? recentStates[0].dateCreated : ''}"
+
+	if (evt.physical) {
+		if (evt.value == "on" && lastTwoStatesWere("on", recentStates, evt)) {
+			log.debug "${evt.device.displayName}: detected two taps, turn on other light(s)"
+			
+		} else if (evt.value == "off" && lastTwoStatesWere("off", recentStates, evt)) {
+			log.debug "${evt.device.displayName}: detected two taps, turn off other light(s)"
+		
+		}
+        log.trace "${evt.device.displayName}: Register physical on/off event"
+	}
+	else {
+		log.trace "${evt.device.displayName}: Skipping digital on/off event"
+	}
+}
+
+private lastTwoStatesWere(value, states, evt) {
+	def result = false
+	if (states) {
+
+		log.trace "unfiltered: [${states.collect{it.dateCreated + ':' + it.value}.join(', ')}]"
+		def onOff = states.findAll { it.physical || !it.type }
+		log.trace "filtered:   [${onOff.collect{it.dateCreated + ':' + it.value}.join(', ')}]"
+
+		// This test was needed before the change to use Event rather than DeviceState. It should never pass now.
+		if (onOff[0].date.before(evt.date)) {
+			log.warn "Last state does not reflect current event, evt.date: ${evt.dateCreated}, state.date: ${onOff[0].dateCreated}"
+			result = evt.value == value && onOff[0].value == value
+		}
+		else {
+			result = onOff.size() > 1 && onOff[0].value == value && onOff[1].value == value
+		}
+	}
+	result
+}
+
 
 def triggerDevice(Map envinfo, dev) {
 	def devState = state.devices[dev.id]

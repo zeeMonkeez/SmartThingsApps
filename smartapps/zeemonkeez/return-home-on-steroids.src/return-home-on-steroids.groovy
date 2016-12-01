@@ -127,6 +127,10 @@ def extraOptionsPage() {
 		section ("Zip code (optional, defaults to location coordinates when location services are enabled)...") {
 			input "zipCode", "text", title: "Zip code", required: false
 		}
+        section ("Minimum time between presence events:") {
+   			input "minDelay", "number", title: "Minimum delay", defaultValue: 10, required: true
+		}
+		
 
 		section("Via a push notification and/or an SMS message"){
 			input("recipients", "contact", title: "Send notifications to") {
@@ -183,18 +187,11 @@ def parseSettingsForDevice(dev) {
 	state.devices[devId] = state.devices[devId]?: [:]
 	state.devices[devId].isDimmer = dev.hasCapability("Switch Level")
 	state.devices[devId].switchLevel = state.devices[devId].isDimmer ? settings["switchLevel_${devId}"] ?: settings.switchLevel : null
-	state.devices[devId].switchOffDelay = settings["switchOffDelay_${devId}"] ?: settings.switchOffDelay
+	state.devices[devId].switchOffDelay = (settings["switchOffDelay_${devId}"]!= null) ? settings["switchOffDelay_${devId}"] : settings.switchOffDelay
 	state.devices[devId].onlyAtNight = (settings["onlyAtNight_${devId}"] ?: settings.onlyAtNight) == 'Yes'
 	state.devices[devId].switchAlwaysTurnOff = (settings["switchAlwaysTurnOff_${devId}"] ?: settings.switchAlwaysTurnOff) == 'Yes'
 	state.devices[devId].onlyIfHouseEmpty = (settings["onlyIfHouseEmpty_${devId}"] ?: settings.onlyIfHouseEmpty) == 'Yes'
-    log.debug "settings.onlyAtNight ${settings.onlyAtNight}"
-    log.debug "settings.switchAlwaysTurnOff ${settings.switchAlwaysTurnOff}"
-    log.debug "settings.onlyIfHouseEmpty ${settings.onlyIfHouseEmpty}"
-
-
-    def oihe = settings.onlyIfHouseEmpty
-    def oihed = settings["onlyIfHouseEmpty_${devId}"]
-    log.debug "$dev.displayName only if house empty: $oihe, $oihed -> ${state.devices[devId].onlyIfHouseEmpty}"
+    
 	state.devices[devId].hasBeenTriggered = false
 	state.devices[devId].oldLevel = null
 	state.devices[devId].oldSwitch = 'off'
@@ -228,20 +225,29 @@ def updated() {
 
 def initialize() {
 	state.devices = state?.devices ?: [:]
+    state.lastTriggered = 0
 	settings.switches?.each {parseSettingsForDevice(it)}
 	subscribe(presenceDevices, "presence.present", presence)
 	subscribe(location, "position", locationPositionChange)
 	subscribe(location, "sunriseTime", sunriseSunsetTimeHandler)
 	subscribe(location, "sunsetTime", sunriseSunsetTimeHandler)
-    subscribe(switches, "switch", switchHandler, [filterEvents: false])
+//    subscribe(switches, "switch", switchHandler, [filterEvents: false])
 	astroCheck()
 
 }
 
 
 def presence(evt) {
-	// test if anybody was at home at all, or not. If there was, and option was set,
+    Long lastTriggered = state.lastTriggered?:0
+    def t_diff = now() - lastTriggered
+    if (t_diff < settings["minDelay"] * 60 * 1000) {
+      log.debug "Last triggered $t_diff, not long enough ago."
+	  return false
+    }
+      
+   	// test if anybody was at home at all, or not. If there was, and option was set,
 	// ignore event
+   
 	def someoneAtHome = presenceDevices?.find{
 		it.id == evt.device.id ? false : it.currentPresence == 'present'
 	}
@@ -256,6 +262,7 @@ def presence(evt) {
     if (switchedSwitches.size() > 0) {
 		def devNames = switchedSwitches.join(', ')
 		message = "${evt.displayName} arrived at home, turning on $devNames!"
+        state.lastTriggered = now()
     }
     else {
     	message = "${evt.displayName} arrived at home, but no devices set to be turned on!"
@@ -322,13 +329,14 @@ def triggerDevice(Map envinfo, dev) {
 	}
 	if (!devState.hasBeenTriggered) {
 		state.devices[dev.id].oldSwitch = dev.currentSwitch
+		dev.on()
+		log.info "Turn $dev.displayName on."
 		if (devState.isDimmer) {
 			state.devices[dev.id].oldLevel = dev.currentLevel
 			dev.setLevel(devState.switchLevel)
 			log.info "Set ${dev.displayName} to level $devState.switchLevel"
 		}
-		dev.on()
-		log.info "Turn $dev.displayName on."
+
 		log.debug "Saving Old State ${state.devices[dev.id].oldSwitch}, ${state.devices[dev.id].oldLevel}."
 		state.devices[dev.id].hasBeenTriggered = true
 	}
@@ -403,6 +411,7 @@ private sendMessage(msg) {
 				log.debug 'Sending SMS'
 				options.method = 'phone'
 			}
+            
 		} else if (pushAndPhone != 'No') {
 			log.debug 'Sending push'
 			options.method = 'push'
@@ -426,30 +435,30 @@ def addToSchedule(did, Map pmap) {
 
 	// add 2 seconds to ensure handler will be called after event
 	runIn(ptime + 2, scheduleHandler, [overwrite: false])
-	log.info "Adding task $pmap to scheduler for $did"
+	//log.info "Adding task $pmap to scheduler for $did"
 }
 
 
 def scheduleHandler(val) {
 	state.schedule = state.schedule ?: [:]
-	log.info "Working handler"
-	log.debug "Pre-state.schedule: $state.schedule"
+	//log.info "Working handler"
+	//log.debug "Pre-state.schedule: $state.schedule"
 	def t_now = now()
-	log.debug "Time now: $t_now"
+	//log.debug "Time now: $t_now"
 
 	def due = state.schedule.findAll {it.value?.time < t_now}
-	log.debug "Tasks due: $due"
+	//log.debug "Tasks due: $due"
 	due.each {
 		def mpar = it.value?.methods ?: [it.value?.method]
-        log.debug "mpar $mpar"
+       // log.debug "mpar $mpar"
 		if (mpar instanceof String) {
 			mpar = [mpar]
 		}
-        log.debug "mpar2 $mpar"
+       // log.debug "mpar2 $mpar"
 		def device = settings.switches.find {sw -> sw.id == it.key}
 if (        state.devices[it.key].hasBeenTriggered ) {
 		mpar.each {mpa ->
-	        log.debug "mpa $mpa"
+	     //   log.debug "mpa $mpa"
 			def m = mpa[0]
 			def p = mpa[1]?:[]
 			device?."${m}"(*p)
